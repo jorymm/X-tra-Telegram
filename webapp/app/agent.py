@@ -1,91 +1,32 @@
-"""AI agent that manages tasks in the database via Claude tool use.
+"""AI agent that manages tasks in the database via Google Gemini function calling.
 
-The agent runs a manual agentic loop: Claude decides which tools to call
-(create/list/update/delete tasks), we execute them against the database,
-feed the results back, and repeat until Claude produces a final answer.
+The Gemini SDK runs the agentic loop automatically: the model decides which
+Python tool functions to call (create/list/update/delete tasks), the SDK
+executes them against the database and feeds results back until the model
+produces a final answer.
 """
 
-import json
 import os
 
-import anthropic
+from google import genai
+from google.genai import types
 from sqlalchemy.orm import Session
 
 from . import crud, schemas
 
-MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
-MAX_AGENT_TURNS = 10
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 SYSTEM_PROMPT = """\
 أنت مساعد ذكي لإدارة المهام في تطبيق "مهامي".
 تستطيع إنشاء المهام وعرضها وتعديلها وإكمالها وحذفها باستخدام الأدوات المتاحة.
 - رد دائماً بنفس لغة المستخدم (العربية غالباً).
 - عند إنشاء مهمة، استنتج الأولوية (low/normal/high) من سياق كلام المستخدم.
+- قبل تعديل أو حذف مهمة، استخدم list_tasks لمعرفة رقمها إذا لم يذكره المستخدم.
 - كن مختصراً وودوداً، ولخّص ما فعلته بعد استخدام الأدوات.
 """
 
-TOOLS = [
-    {
-        "name": "create_task",
-        "description": "إنشاء مهمة جديدة في قاعدة البيانات. استخدمها عندما يطلب المستخدم إضافة مهمة أو تذكير.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string", "description": "عنوان المهمة"},
-                "description": {"type": "string", "description": "وصف تفصيلي اختياري"},
-                "priority": {
-                    "type": "string",
-                    "enum": ["low", "normal", "high"],
-                    "description": "أولوية المهمة",
-                },
-            },
-            "required": ["title"],
-        },
-    },
-    {
-        "name": "list_tasks",
-        "description": "عرض المهام من قاعدة البيانات. استخدمها عندما يسأل المستخدم عن مهامه أو قبل تعديل/حذف مهمة لمعرفة رقمها.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "status": {
-                    "type": "string",
-                    "enum": ["pending", "done"],
-                    "description": "تصفية حسب الحالة (اتركه فارغاً لعرض الكل)",
-                },
-            },
-        },
-    },
-    {
-        "name": "update_task",
-        "description": "تعديل مهمة موجودة: تغيير العنوان أو الوصف أو الأولوية أو تعليمها كمكتملة (status=done).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "integer", "description": "رقم المهمة"},
-                "title": {"type": "string"},
-                "description": {"type": "string"},
-                "status": {"type": "string", "enum": ["pending", "done"]},
-                "priority": {"type": "string", "enum": ["low", "normal", "high"]},
-            },
-            "required": ["task_id"],
-        },
-    },
-    {
-        "name": "delete_task",
-        "description": "حذف مهمة نهائياً من قاعدة البيانات.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "integer", "description": "رقم المهمة المراد حذفها"},
-            },
-            "required": ["task_id"],
-        },
-    },
-]
-
 # Conversation history per browser session (in-memory; tasks live in the DB).
-_sessions: dict[str, list[dict]] = {}
+_histories: dict[str, list] = {}
 
 
 def _task_to_dict(task) -> dict:
@@ -98,82 +39,99 @@ def _task_to_dict(task) -> dict:
     }
 
 
-def _execute_tool(db: Session, name: str, tool_input: dict) -> tuple[str, bool]:
-    """Run a tool against the database. Returns (result_json, is_error)."""
-    try:
-        if name == "create_task":
-            task = crud.create_task(db, schemas.TaskCreate(**tool_input))
-            return json.dumps({"created": _task_to_dict(task)}, ensure_ascii=False), False
-
-        if name == "list_tasks":
-            tasks = crud.list_tasks(db, status=tool_input.get("status"))
-            return json.dumps({"tasks": [_task_to_dict(t) for t in tasks]}, ensure_ascii=False), False
-
-        if name == "update_task":
-            task = crud.get_task(db, tool_input["task_id"])
-            if task is None:
-                return f"لا توجد مهمة برقم {tool_input['task_id']}", True
-            fields = {k: v for k, v in tool_input.items() if k != "task_id"}
-            task = crud.update_task(db, task, schemas.TaskUpdate(**fields))
-            return json.dumps({"updated": _task_to_dict(task)}, ensure_ascii=False), False
-
-        if name == "delete_task":
-            task = crud.get_task(db, tool_input["task_id"])
-            if task is None:
-                return f"لا توجد مهمة برقم {tool_input['task_id']}", True
-            crud.delete_task(db, task)
-            return json.dumps({"deleted": tool_input["task_id"]}), False
-
-        return f"أداة غير معروفة: {name}", True
-    except Exception as exc:  # surface tool failures to the model so it can adapt
-        return f"خطأ أثناء تنفيذ الأداة: {exc}", True
-
-
 def chat(db: Session, session_id: str, user_message: str) -> tuple[str, list[str]]:
     """Send a user message to the agent and return (reply, tools_used)."""
-    client = anthropic.Anthropic()
-
-    history = _sessions.setdefault(session_id, [])
-    history.append({"role": "user", "content": user_message})
-
+    client = genai.Client()  # reads GEMINI_API_KEY from the environment
     tools_used: list[str] = []
 
-    for _ in range(MAX_AGENT_TURNS):
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=4096,
-            thinking={"type": "adaptive"},
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=history,
+    # Tools are defined as closures so each request uses its own DB session.
+    def create_task(title: str, description: str = "", priority: str = "normal") -> dict:
+        """إنشاء مهمة جديدة في قاعدة البيانات.
+
+        Args:
+            title: عنوان المهمة.
+            description: وصف تفصيلي اختياري.
+            priority: أولوية المهمة: low أو normal أو high.
+        """
+        tools_used.append("create_task")
+        if priority not in ("low", "normal", "high"):
+            priority = "normal"
+        task = crud.create_task(
+            db, schemas.TaskCreate(title=title, description=description, priority=priority)
         )
+        return {"created": _task_to_dict(task)}
 
-        history.append({"role": "assistant", "content": response.content})
+    def list_tasks(status: str = "") -> dict:
+        """عرض المهام من قاعدة البيانات.
 
-        if response.stop_reason != "tool_use":
-            break
+        Args:
+            status: تصفية حسب الحالة: pending أو done، أو نص فارغ لعرض الكل.
+        """
+        tools_used.append("list_tasks")
+        tasks = crud.list_tasks(db, status=status or None)
+        return {"tasks": [_task_to_dict(t) for t in tasks]}
 
-        tool_results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                tools_used.append(block.name)
-                result, is_error = _execute_tool(db, block.name, block.input)
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result,
-                        "is_error": is_error,
-                    }
-                )
-        history.append({"role": "user", "content": tool_results})
+    def update_task(
+        task_id: int,
+        title: str = "",
+        description: str = "",
+        status: str = "",
+        priority: str = "",
+    ) -> dict:
+        """تعديل مهمة موجودة: تغيير العنوان أو الوصف أو الأولوية أو تعليمها كمكتملة.
 
-    reply = next(
-        (b.text for b in response.content if b.type == "text"),
-        "تم تنفيذ الطلب.",
+        Args:
+            task_id: رقم المهمة.
+            title: العنوان الجديد (اتركه فارغاً لعدم التغيير).
+            description: الوصف الجديد (اتركه فارغاً لعدم التغيير).
+            status: الحالة الجديدة: pending أو done (اتركه فارغاً لعدم التغيير).
+            priority: الأولوية الجديدة: low أو normal أو high (اتركه فارغاً لعدم التغيير).
+        """
+        tools_used.append("update_task")
+        task = crud.get_task(db, task_id)
+        if task is None:
+            return {"error": f"لا توجد مهمة برقم {task_id}"}
+        fields = {
+            k: v
+            for k, v in {
+                "title": title,
+                "description": description,
+                "status": status,
+                "priority": priority,
+            }.items()
+            if v
+        }
+        task = crud.update_task(db, task, schemas.TaskUpdate(**fields))
+        return {"updated": _task_to_dict(task)}
+
+    def delete_task(task_id: int) -> dict:
+        """حذف مهمة نهائياً من قاعدة البيانات.
+
+        Args:
+            task_id: رقم المهمة المراد حذفها.
+        """
+        tools_used.append("delete_task")
+        task = crud.get_task(db, task_id)
+        if task is None:
+            return {"error": f"لا توجد مهمة برقم {task_id}"}
+        crud.delete_task(db, task)
+        return {"deleted": task_id}
+
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        tools=[create_task, list_tasks, update_task, delete_task],
     )
-    return reply, tools_used
+
+    chat_session = client.chats.create(
+        model=MODEL,
+        config=config,
+        history=_histories.get(session_id, []),
+    )
+    response = chat_session.send_message(user_message)
+    _histories[session_id] = chat_session.get_history()
+
+    return response.text or "تم تنفيذ الطلب.", tools_used
 
 
 def reset_session(session_id: str) -> None:
-    _sessions.pop(session_id, None)
+    _histories.pop(session_id, None)

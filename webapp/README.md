@@ -7,7 +7,7 @@
 | الباكند | FastAPI |
 | الفرونت اند | Jinja2 templates + CSS/JS (يُقدَّم من FastAPI) |
 | قاعدة البيانات | PostgreSQL (عبر SQLAlchemy) — أو SQLite للتشغيل المحلي |
-| الإيجنت الذكي | Claude (Anthropic API) مع Tool Use — يقرأ ويكتب في قاعدة البيانات |
+| الإيجنت الذكي | Google Gemini (مجاني) مع Function Calling — يقرأ ويكتب في قاعدة البيانات |
 | التشغيل | Docker + Docker Compose |
 
 ## ✨ الميزات
@@ -23,7 +23,7 @@
 
 ```bash
 cd webapp
-cp .env.example .env       # ثم ضع مفتاح ANTHROPIC_API_KEY داخل .env
+cp .env.example .env       # ثم ضع مفتاح GEMINI_API_KEY داخل .env (مجاني من aistudio.google.com)
 docker compose up --build
 ```
 
@@ -54,7 +54,7 @@ webapp/
 │   ├── models.py        # جدول المهام
 │   ├── schemas.py       # نماذج Pydantic
 │   ├── crud.py          # عمليات قاعدة البيانات
-│   ├── agent.py         # الإيجنت الذكي (Claude + Tool Use)
+│   ├── agent.py         # الإيجنت الذكي (Gemini + Function Calling)
 │   ├── routers/
 │   │   ├── tasks.py     # REST API للمهام
 │   │   └── chat.py      # API المحادثة مع الإيجنت
@@ -67,11 +67,11 @@ webapp/
 
 ## 🤖 كيف يعمل الإيجنت؟
 
-الإيجنت يستخدم **Tool Use (Function Calling)** مع نموذج Claude:
+الإيجنت يستخدم **Function Calling** مع نموذج Gemini:
 
 1. المستخدم يرسل رسالة (مثلاً «أضف مهمة مذاكرة الرياضيات»)
-2. Claude يقرر استدعاء الأداة المناسبة (`create_task`)
-3. الخادم ينفّذ الأداة على قاعدة البيانات ويرجع النتيجة لـ Claude
-4. تتكرر الحلقة حتى ينتهي Claude ويرد على المستخدم
+2. Gemini يقرر استدعاء الأداة المناسبة (`create_task`)
+3. الخادم ينفّذ الأداة على قاعدة البيانات ويرجع النتيجة لـ Gemini
+4. تتكرر الحلقة حتى ينتهي النموذج ويرد على المستخدم
 
 الأدوات المتاحة للإيجنت: `create_task` · `list_tasks` · `update_task` · `delete_task`
