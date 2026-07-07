@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>مهامي — إدارة المهام بالذكاء الاصطناعي</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>📋 مهامي</h1>
+    <p>إدارة مهامك بمساعدة الذكاء الاصطناعي</p>
+  </header>
+
+  <main>
+    <!-- قسم المهام -->
+    <section class="panel" id="tasks-panel">
+      <h2>المهام</h2>
+      <form id="task-form">
+        <input type="text" id="task-title" placeholder="عنوان المهمة..." required>
+        <select id="task-priority">
+          <option value="low">منخفضة</option>
+          <option value="normal" selected>عادية</option>
+          <option value="high">عالية</option>
+        </select>
+        <button type="submit">إضافة</button>
+      </form>
+      <div class="filters">
+        <button class="filter active" data-status="">الكل</button>
+        <button class="filter" data-status="pending">قيد التنفيذ</button>
+        <button class="filter" data-status="done">مكتملة</button>
+      </div>
+      <ul id="task-list"></ul>
+    </section>
+
+    <!-- قسم المساعد الذكي -->
+    <section class="panel" id="chat-panel">
+      <h2>🤖 المساعد الذكي</h2>
+      <div id="chat-messages">
+        <div class="msg bot">أهلاً! أنا مساعدك لإدارة المهام. جرب: «أضف مهمة شراء الحليب» أو «شو مهامي اليوم؟»</div>
+      </div>
+      <form id="chat-form">
+        <input type="text" id="chat-input" placeholder="اكتب رسالتك..." autocomplete="off" required>
+        <button type="submit">إرسال</button>
+      </form>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
